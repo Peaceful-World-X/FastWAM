@@ -58,6 +58,47 @@ conda activate fastwam
 pip install -U pip
 pip install torch==2.7.1+cu128 torchvision==0.22.1+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
 pip install -e .
+
+# 法2
+docker pull docker.1ms.run/pytorch/pytorch:2.7.1-cuda12.8-cudnn9-devel
+docker run -it \
+  --name FastWAM_xwy \
+  --init \
+  --gpus all \
+  -e NVIDIA_VISIBLE_DEVICES=all \
+  -e CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+  --shm-size=64G \
+  --network host \
+  -v /home/xuewenyao/code:/home/xuewenyao/code \
+  -v /home/models:/home/models \
+  -v /home/pub_envs:/home/pub_envs \
+  -v /home/results:/home/results \
+  -v /home/datasets:/home/datasets \
+  -v /home/datasets_v2:/home/datasets_v2 \
+  -v /home/datasets_2:/home/datasets_2 \
+  docker.1ms.run/pytorch/pytorch:2.7.1-cuda12.8-cudnn9-devel
+
+conda create -n fastwam --clone base -y
+conda activate fastwam
+conda install python=3.10 -y
+pip install -U pip
+pip install torch==2.7.1+cu128 torchvision==0.22.1+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
+pip install -e .
+
+docker exec -u 0 -it FastWAM_xwy /bin/bash 
+cd /home/xuewenyao/code
+
+# 3. 预计算文本 embedding（训练前必跑）
+cd /home/xuewenyao/code/FastWAM
+python scripts/precompute_text_embeds.py task=my_robot_uncond_2cam224_ft
+# 启动训练
+export DIFFSYNTH_MODEL_BASE_PATH=/home/models/FastWAM/checkpoints
+export FASTWAM_OUTPUT_DIR=/home/datasets_v2/FastWAM/manual_run_001
+
+cd /home/xuewenyao/code/FastWAM
+bash scripts/train_zero1.sh 8 task=my_robot_uncond_2cam224_ft \
+  output_dir=/home/datasets_v2/FastWAM/my_robot_uncond_2cam224_ft/2026-04-07_manual
+
 ```
 
 ## 模型准备
@@ -69,18 +110,26 @@ pip install -e .
 ```bash
 mkdir -p checkpoints
 export DIFFSYNTH_MODEL_BASE_PATH="$(pwd)/checkpoints"
+
+export DIFFSYNTH_MODEL_BASE_PATH= "/home/models/FastWAM/checkpoints"
 ```
 
-第二步，预生成 ActionDiT backbone（从Wan22 DiT插值）：
+第二步，预生成 Action DiT backbone（从Wan22 DiT插值）：
 
 ```bash
 # uncond (fastwam)
 python scripts/preprocess_action_dit_backbone.py \
   --model-config configs/model/fastwam.yaml \
-  --output checkpoints/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt \
+  --output /home/models/FastWAM/checkpoints/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt \
   --device cuda \
   --dtype bfloat16
 ```
+
+第3步，设置 
+FastWAM/configs/data/my_robot_lerobot.yaml
+FastWAM/configs/task/my_robot_uncond_2cam224_ft.yaml
+export DIFFSYNTH_MODEL_BASE_PATH=/home/models/FastWAM/checkpoints
+
 
 ## 数据集下载
 
@@ -160,7 +209,14 @@ huggingface-cli download yuanty/fastwam \
   libero_uncond_2cam224_dataset_stats.json \
   robotwin_uncond_3cam_384.pt \
   robotwin_uncond_3cam_384_dataset_stats.json \
-  --local-dir ./checkpoints/fastwam_release
+  --local-dir /home/models/FastWAM/checkpoints/fastwam_release
+
+export HF_ENDPOINT=https://hf-mirror.com
+
+hf download yuanty/fastwam \
+  libero_uncond_2cam224.pt \
+  libero_uncond_2cam224_dataset_stats.json \
+  --local-dir /home/models/FastWAM/checkpoints/fastwam_release
 ```
 
 下载后，本地目录应为：

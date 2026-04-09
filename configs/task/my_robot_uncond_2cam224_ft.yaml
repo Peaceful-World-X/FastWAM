@@ -1,0 +1,44 @@
+# @package _global_
+# Franka 双臂 LeRobot 微调任务：合并 data=my_robot_lerobot + model=fastwam。
+# 修改 defaults 会换数据集或模型结构；需同步 precompute_text_embeds 与 action_dit 路径。
+# 输出目录由 scripts/train_zero1.sh 决定：可设 FASTWAM_RUNS_BASE=/home/datasets_v2/FastWAM（见脚本内注释）。
+
+defaults:
+  - override /data: my_robot_lerobot
+  - override /model: fastwam
+  - _self_
+
+# 每张 GPU 上一个 step 的样本数。调大 → 梯度更稳、显存占用更高，可能 OOM；调小 → 更省显存、收敛噪声更大。
+# 全局有效 batch ≈ batch_size × GPU 数（见 train 里 accelerate 逻辑）。
+batch_size: 16
+# DataLoader 预取进程数。调大可能加快读盘/解码，过高占 CPU/内存；IO 慢时可试 4–8。
+num_workers: 8
+
+model:
+  # true：视频/动作 DiT 块用 gradient checkpoint，省显存、算得更慢。false：更吃显存、通常更快。
+  mot_checkpoint_mixed_attn: false
+  # preprocess_action_dit_backbone.py 生成的 ActionDiT 权重；路径错会启动失败或随机初始化动作分支。
+  action_dit_pretrained_path: /home/models/FastWAM/checkpoints/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt
+
+# 学习率调度：cosine 在训练步数内余弦降到接近 eta_min。改成 constant 则全程固定 LR（需在 train 支持列表内）。
+lr_scheduler_type: "cosine"
+# 学习率。调大 → 可能不稳定/发散；调小 → 更稳但更慢，微调官方权重时常略低于 1e-4。
+learning_rate: 1e-4
+# max_steps 非 null 时 num_epochs 仅影响日志里的 epoch 计数，不决定何时停止。
+num_epochs: 10
+# 固定总 optimizer 步数 5 万；cosine 按该总步数（含约 5% warmup）衰减。改回 null 则用 num_epochs×每 epoch 步数。
+max_steps: 50000
+# 5 万步下适当稀疏日志，减少终端/磁盘写压力；想更密可改回 10。
+log_every: 50
+# 每次会写 weights + DeepSpeed save_state，体积大。10000 → 约 5 次中间存档 + 结束存档；曾磁盘满可再加大或缩小 save_every。
+save_every: 10000
+# 验证含推理很慢。200 步/次在 5 万步约 250 次 eval；1000 → 约 50 次，总墙钟时间省很多。要更密监控可改 500。
+eval_every: 1000
+
+# 梯度累积：有效全局 batch ≈ batch_size × GPU 数 × 本值。调大 → 等价更大 batch、显存按 micro-batch 算。
+gradient_accumulation_steps: 1
+# 权重衰减（L2）。调大 → 更强正则、可能欠拟合；调小/0 → 更易过拟合。
+weight_decay: 1e-2
+# 指向 .pt 则在 Wan 初始化后再加载 FastWAM 权重（仅权重，不恢复优化器）；null 表示不加载发布版 checkpoint。
+# 注意：维度须与当前 data（如 8D action）一致，libero 7D 权重不可直接用于 8D。
+resume: null
