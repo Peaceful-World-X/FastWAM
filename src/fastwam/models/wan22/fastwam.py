@@ -1098,7 +1098,11 @@ class FastWAM(torch.nn.Module):
         torch.save(payload, path)
 
     def load_checkpoint(self, path, optimizer=None):
-        payload = torch.load(path, map_location=self.device)
+        # PyTorch 2.6+ defaults weights_only=True; FastWAM checkpoints are trusted dict pickles.
+        try:
+            payload = torch.load(path, map_location=self.device, weights_only=False)
+        except TypeError:
+            payload = torch.load(path, map_location=self.device)
         if "mot" in payload:
             self.mot.load_state_dict(payload["mot"], strict=False)
         elif "dit" in payload:

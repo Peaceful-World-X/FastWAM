@@ -40,6 +40,15 @@ dependencies = [
   "wandb==0.23.1",
 ]
 
+[project.optional-dependencies]
+# OpenPI-compatible WebSocket serving (scripts/serve_policy.py).
+# Also install openpi-client from source: pip install -e /path/to/openpi/packages/openpi-client
+serving = [
+  "msgpack>=1.0.0",
+  "tyro>=0.8.0",
+  "websockets>=13.0",
+]
+
 [tool.setuptools.package-dir]
 "" = "src"
 
