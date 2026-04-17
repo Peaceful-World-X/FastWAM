@@ -1,5 +1,5 @@
 # @package _global_
-# Franka 双臂 LeRobot 微调任务：合并 data=my_robot_lerobot + model=fastwam。
+# armigo4 LeRobot 微调（info.json v2.1：三路相机 480x640，7D state/action）：合并 data=my_robot_lerobot + model=fastwam。
 # 修改 defaults 会换数据集或模型结构；需同步 precompute_text_embeds 与 action_dit 路径。
 # 输出目录由 scripts/train_zero1.sh 决定：可设 FASTWAM_RUNS_BASE=/home/datasets_v2/FastWAM（见脚本内注释）。
 
@@ -16,7 +16,7 @@ num_workers: 8
 
 model:
   # true：视频/动作 DiT 块用 gradient checkpoint，省显存、算得更慢。false：更吃显存、通常更快。
-  mot_checkpoint_mixed_attn: false
+  mot_checkpoint_mixed_attn: true
   # preprocess_action_dit_backbone.py 生成的 ActionDiT 权重；路径错会启动失败或随机初始化动作分支。
   action_dit_pretrained_path: /home/models/FastWAM/checkpoints/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt
 
@@ -40,5 +40,5 @@ gradient_accumulation_steps: 1
 # 权重衰减（L2）。调大 → 更强正则、可能欠拟合；调小/0 → 更易过拟合。
 weight_decay: 1e-2
 # 指向 .pt 则在 Wan 初始化后再加载 FastWAM 权重（仅权重，不恢复优化器）；null 表示不加载发布版 checkpoint。
-# 注意：维度须与当前 data（如 8D action）一致，libero 7D 权重不可直接用于 8D。
+# 注意：action/state 维度须与 data 一致（当前 my_robot_lerobot 为 7D）；跨维度 checkpoint 不可直接混用。
 resume: null

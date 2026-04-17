@@ -30,9 +30,11 @@ RoboTwin-style checkpoint (three cameras)::
     --image-layout=robotwin \\
     --policy.dir=/path/to/run_with_weights
 
-Use port 8010::
+MyRobot：显式 ``--image-layout=openpi_2cam_joint``（两相机关节）或 ``--image-layout=openpi_3cam_ee``（三相机末端），见 Guide.md。
 
-  uv run scripts/serve_policy.py --port=8010 policy:checkpoint \\
+Use port 8010 (``--port`` may appear before or after ``policy:checkpoint``; both work)::
+
+  uv run scripts/serve_policy.py policy:checkpoint --port=8010 \\
     --policy.dir=/path/to/checkpoint/step_50000
 """
 
@@ -52,6 +54,42 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from fastwam.serving.openpi_serve import launch_from_policy_dir
+
+
+def _promote_root_flags_before_subcommand(argv: list[str]) -> list[str]:
+    """Move root-level ``Args`` flags before ``policy:checkpoint``.
+
+    Tyro attaches tokens after a union subcommand to that branch only; ``Checkpoint`` only has
+    ``--policy.*`` fields, so ``--port``, ``--image-layout``, etc. must appear *before*
+    ``policy:checkpoint`` unless we reorder here (same UX as OpenPI when users put flags last).
+    """
+    marker = "policy:checkpoint"
+    if marker not in argv:
+        return argv
+    sub_i = argv.index(marker)
+    tail = argv[sub_i + 1 :]
+    promoted: list[str] = []
+    rest: list[str] = []
+    i = 0
+    while i < len(tail):
+        tok = tail[i]
+        if tok.startswith("--policy."):
+            rest.append(tok)
+            i += 1
+            continue
+        if tok.startswith("--") and not tok.startswith("--policy."):
+            promoted.append(tok)
+            if "=" not in tok and i + 1 < len(tail) and not tail[i + 1].startswith("-"):
+                promoted.append(tail[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+        rest.append(tok)
+        i += 1
+    if not promoted:
+        return argv
+    return argv[:sub_i] + promoted + [marker] + rest
 
 
 @dataclasses.dataclass
@@ -88,6 +126,7 @@ class Args:
     # Extra Hydra overrides (repeatable), e.g. ``data.train.dataset_dirs=...``.
     hydra_override: list[str] = dataclasses.field(default_factory=list)
 
+    # Use ``openpi_2cam_joint`` (two cams, joint state) or ``openpi_3cam_ee`` (three cams, EE state); ``auto`` follows Hydra data config.
     image_layout: str = "auto"
     action_horizon: int | None = None
     num_inference_steps: int | None = None
@@ -127,6 +166,9 @@ def main(args: Args) -> None:
     cdir = args.config_dir if args.config_dir is not None else PROJECT_ROOT / "configs"
     cdir = cdir.resolve()
 
+    resolved_layout = (args.image_layout or "").strip() or "auto"
+    logging.info("image_layout=%s", resolved_layout)
+
     launch_from_policy_dir(
         policy_dir=ck.dir,
         policy_config=ck.config,
@@ -145,7 +187,7 @@ def main(args: Args) -> None:
         negative_prompt=args.negative_prompt,
         rand_device=args.rand_device,
         tiled=args.tiled,
-        image_layout=args.image_layout,
+        image_layout=resolved_layout,
     )
 
 
@@ -156,4 +198,5 @@ if __name__ == "__main__":
         format="%(asctime)s,%(msecs)03d %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    sys.argv[:] = _promote_root_flags_before_subcommand(sys.argv)
     main(tyro.cli(Args))

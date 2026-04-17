@@ -3,9 +3,13 @@
 
 Requires: pip install -e /path/to/openpi/packages/openpi-client
 
-Example (server on host port 8090):
-  python /home/xuewenyao/code/FastWAM/scripts/mock_openpi_client.py \\
-    --host 127.0.0.1 --port 8090 --num-rounds 5
+Examples (server on host port 8090)::
+
+  # Match server: --image-layout=openpi_2cam_joint
+  python scripts/mock_openpi_client.py --host 127.0.0.1 --port 8090 --image-layout openpi_2cam_joint
+
+  # Match server: --image-layout=openpi_3cam_ee
+  python scripts/mock_openpi_client.py --host 127.0.0.1 --port 8090 --image-layout openpi_3cam_ee --state-dim 7
 """
 
 from __future__ import annotations
@@ -28,7 +32,18 @@ def main() -> None:
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Server host (not 0.0.0.0).")
     parser.add_argument("--port", type=int, default=8090, help="WebSocket port (match serve_policy.py).")
     parser.add_argument("--num-rounds", type=int, default=5, help="Number of infer calls.")
-    parser.add_argument("--action-dim", type=int, default=8, help="State vector length (training dim).")
+    parser.add_argument(
+        "--image-layout",
+        choices=("openpi_2cam_joint", "openpi_3cam_ee"),
+        default="openpi_2cam_joint",
+        help="Must match server --image-layout (observation keys differ).",
+    )
+    parser.add_argument(
+        "--state-dim",
+        type=int,
+        default=8,
+        help="Length of state vector (joint DOF or 7D EE+grip); must match training.",
+    )
     parser.add_argument("--h", type=int, default=224, help="Per-camera height (pixels).")
     parser.add_argument("--w", type=int, default=224, help="Per-camera width (pixels).")
     parser.add_argument(
@@ -45,12 +60,29 @@ def main() -> None:
     logger.info("Server metadata: %s", meta)
 
     for i in range(args.num_rounds):
-        obs = {
-            "observation/image": np.random.randint(0, 255, size=(args.h, args.w, 3), dtype=np.uint8),
-            "observation/wrist_image": np.random.randint(0, 255, size=(args.h, args.w, 3), dtype=np.uint8),
-            "state": np.random.randn(args.action_dim).astype(np.float32),
-            "prompt": f"{args.prompt} (round {i + 1})",
-        }
+        if args.image_layout == "openpi_2cam_joint":
+            obs = {
+                "observation": {
+                    "image": np.random.randint(0, 255, size=(args.h, args.w, 3), dtype=np.uint8),
+                    "wrist_image": np.random.randint(
+                        0, 255, size=(args.h, args.w, 3), dtype=np.uint8
+                    ),
+                    "state": np.random.randn(args.state_dim).astype(np.float32),
+                },
+                "prompt": f"{args.prompt} (round {i + 1})",
+            }
+        else:
+            obs = {
+                "observation": {
+                    "top_image": np.random.randint(0, 255, size=(args.h, args.w, 3), dtype=np.uint8),
+                    "front_image": np.random.randint(0, 255, size=(args.h, args.w, 3), dtype=np.uint8),
+                    "right_wrist_image": np.random.randint(
+                        0, 255, size=(args.h, args.w, 3), dtype=np.uint8
+                    ),
+                    "state": np.random.randn(args.state_dim).astype(np.float32),
+                },
+                "prompt": f"{args.prompt} (round {i + 1})",
+            }
         t0 = time.perf_counter()
         try:
             out = policy.infer(obs)

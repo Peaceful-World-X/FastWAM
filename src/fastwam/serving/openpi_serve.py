@@ -4,9 +4,14 @@
 Includes: checkpoint path resolution, ``FastWAMOpenPIBridgePolicy``, ``WebsocketPolicyServer``,
 and ``launch_from_policy_dir`` / ``launch_openpi_websocket_server``.
 
-Client observation keys: two RGB streams ``observation/image`` + ``observation/wrist_image`` (or
-aliases in code), ``state`` or Droid joint+gripper keys, ``prompt``; RoboTwin nested cameras when
-``image_layout=robotwin``. See ``FastWAMOpenPIBridgePolicy.infer``.
+Client observation keys depend on ``serve_policy.py`` ``--image-layout``: **two cams + joints**
+(``openpi_2cam_joint``) uses OpenPI defaults ``observation/image``, ``observation/wrist_image``,
+``state`` (joints), ``prompt``. **Three cams + EE** (``openpi_3cam_ee``) uses
+``observation/top_image``, ``observation/front_image``, ``observation/right_wrist_image``, plus
+``state`` or ``observation/state`` (7D EE+grip), and ``prompt`` (or ``observation/prompt``).
+Nested dict ``{"observation": {"image": ..., "state": ...}}`` matches flat ``observation/*`` keys.
+RoboTwin: ``image_layout=robotwin``. Legacy aliases (``img/*``, ``obs/ee`` + ``obs/grip``) still work
+for 3-cam. See ``FastWAMOpenPIBridgePolicy.infer``.
 """
 
 from __future__ import annotations
@@ -488,6 +493,49 @@ class FastWAMOpenPIBridgePolicy(_openpi_base_policy.BasePolicy):
         x = self._normalize(x)
         return x.to(device=self.model.device, dtype=self.model.torch_dtype)
 
+    def _build_image_tensor_triple_cam(self, obs: dict[str, Any]) -> torch.Tensor:
+        """Three RGB panels concatenated horizontally, matching ``concat_multi_camera: horizontal`` training.
+
+        Preferred OpenPI-style keys (``--type=ee --camera=3``): ``observation/top_image``,
+        ``observation/front_image``, ``observation/right_wrist_image`` (order matches
+        ``configs/data/my_robot_lerobot.yaml``: top, front, right_wrist). Legacy aliases included.
+        """
+        key_groups = (
+            ("observation/top_image", "observation/images/top_image", "img/top", "observation/image_top"),
+            ("observation/front_image", "observation/images/front_image", "img/front", "observation/image_front"),
+            (
+                "observation/right_wrist_image",
+                "observation/images/right_wrist_image",
+                "observation/wrist_image",
+                "img/side",
+            ),
+        )
+        panels: list[np.ndarray] = []
+        for aliases in key_groups:
+            raw = next((v for k in aliases if (v := _lookup(obs, k)) is not None), None)
+            if raw is None:
+                raise KeyError(
+                    f"triple_cam: need one of {aliases} for each panel; "
+                    f"have top-level keys={list(obs.keys())!r}"
+                )
+            panels.append(_parse_image_to_uint8_hwc(raw))
+        h0, w0 = panels[0].shape[0], panels[0].shape[1]
+        for i in range(1, 3):
+            if panels[i].shape[0] != h0 or panels[i].shape[1] != w0:
+                logger.warning(
+                    "triple_cam: panel %d shape %s != panel0 %s; resizing to match",
+                    i,
+                    panels[i].shape[:2],
+                    (h0, w0),
+                )
+                panels[i] = _resize_rgb(panels[i], (w0, h0))
+        concat = np.concatenate(panels, axis=1).copy()
+        x = torch.from_numpy(concat).permute(2, 0, 1).unsqueeze(0).to(dtype=torch.float32)
+        x = self._resize(x)
+        x = self._crop(x)
+        x = self._normalize(x)
+        return x.to(device=self.model.device, dtype=self.model.torch_dtype)
+
     def _build_image_tensor_robotwin(self, obs: dict[str, Any]) -> torch.Tensor:
         o = _lookup(obs, "observation")
         if not isinstance(o, dict):
@@ -504,19 +552,31 @@ class FastWAMOpenPIBridgePolicy(_openpi_base_policy.BasePolicy):
         return image_tensor * (2.0 / 255.0) - 1.0
 
     def _extract_state(self, obs: dict[str, Any]) -> np.ndarray:
+        # Prefer top-level ``state``; also accept ``observation/state`` (flat or nested ``observation``).
         st = _lookup(obs, "state")
+        if st is None:
+            st = _lookup(obs, "observation/state")
         if st is not None:
             return np.asarray(st, dtype=np.float32).reshape(-1)
+        ee = _lookup(obs, "obs/ee")
+        grip = _lookup(obs, "obs/grip")
+        if ee is not None and grip is not None:
+            ee_v = np.asarray(ee, dtype=np.float32).reshape(-1)
+            g_v = np.asarray(grip, dtype=np.float32).reshape(-1)
+            return np.concatenate([ee_v, g_v], axis=0)
         jp = _lookup(obs, "observation/joint_position")
         gp = _lookup(obs, "observation/gripper_position")
         if jp is not None and gp is not None:
             g = np.asarray(gp, dtype=np.float32).reshape(-1)
             j = np.asarray(jp, dtype=np.float32).reshape(-1)
             return np.concatenate([j, g], axis=0)
-        raise KeyError('Need "state" or observation/joint_position + gripper_position.')
+        raise KeyError(
+            'Need "state" or "observation/state", or "obs/ee" + "obs/grip", or '
+            "observation/joint_position + observation/gripper_position."
+        )
 
     def _extract_instruction(self, obs: dict[str, Any]) -> str:
-        for k in ("prompt", "instruction"):
+        for k in ("prompt", "instruction", "observation/prompt"):
             v = _lookup(obs, k)
             if v is not None:
                 return _decode_prompt(v)
@@ -526,6 +586,8 @@ class FastWAMOpenPIBridgePolicy(_openpi_base_policy.BasePolicy):
     def infer(self, obs: dict[str, Any]) -> dict[str, Any]:
         if self._concat_mode == "robotwin":
             image_tensor = self._build_image_tensor_robotwin(obs)
+        elif self._concat_mode in ("triple_cam", "triple_horizontal", "openpi_3cam_ee"):
+            image_tensor = self._build_image_tensor_triple_cam(obs)
         else:
             image_tensor = self._build_image_tensor_two_cam(obs)
         state_vec = self._extract_state(obs)
@@ -571,6 +633,17 @@ class FastWAMOpenPIBridgePolicy(_openpi_base_policy.BasePolicy):
 
 
 # --- launch -----------------------------------------------------------------
+
+
+def _type_camera_hints_from_layout(layout: str | None) -> tuple[str | None, int | None]:
+    """Optional hints for WebSocket metadata (mirrors serve_policy --image-layout names)."""
+    s = (layout or "").strip()
+    if s == "openpi_2cam_joint":
+        return "joint", 2
+    if s == "openpi_3cam_ee":
+        return "ee", 3
+    return None, None
+
 
 def launch_openpi_websocket_server(
     *,
@@ -627,6 +700,11 @@ def launch_openpi_websocket_server(
         "dataset_stats_path": str(dataset_stats_path),
         "observation_keys_doc": "fastwam.serving.openpi_serve.FastWAMOpenPIBridgePolicy.infer",
     }
+    hint_t, hint_c = _type_camera_hints_from_layout(str(policy._concat_mode))
+    if hint_t is not None:
+        metadata["type"] = hint_t
+    if hint_c is not None:
+        metadata["camera"] = hint_c
     logger.info("Listening on ws://%s:%s", host, port)
     WebsocketPolicyServer(policy, host=host, port=port, metadata=metadata).serve_forever()
 
